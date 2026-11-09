@@ -1,0 +1,648 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pixel Dash - Retro Arcade</title>
+
+<style>
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: #100e24;
+  color: white;
+  font-family: monospace;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.game {
+  width: 95%;
+  max-width: 650px;
+  text-align: center;
+  padding: 20px;
+}
+
+h1 {
+  color: #ffdf45;
+  font-size: 38px;
+  text-shadow: 4px 4px #e64c9b;
+  letter-spacing: 3px;
+}
+
+.stats {
+  display: flex;
+  justify-content: space-around;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: #4df5d0;
+  margin: 15px 0;
+  font-size: 14px;
+}
+
+canvas {
+  width: 100%;
+  background: #191638;
+  border: 4px solid #8d5cff;
+  border-radius: 8px;
+  display: block;
+}
+
+button {
+  background: #ffdf45;
+  color: #17132e;
+  border: 0;
+  padding: 12px 15px;
+  margin: 8px 3px;
+  font: bold 14px monospace;
+  cursor: pointer;
+  border-radius: 5px;
+}
+
+button:hover {
+  background: #ff8ac7;
+}
+
+p {
+  color: #bbb4d9;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+</style>
+</head>
+
+<body>
+
+<div class="game">
+
+<h1>PIXEL DASH</h1>
+<p>★ DODGE • COLLECT • SURVIVE ★</p>
+
+<div class="stats">
+  <span>SCORE: <b id="score">0</b></span>
+  <span>LEVEL: <b id="level">1</b></span>
+  <span>LIVES: <b id="lives">3</b></span>
+  <span>BEST: <b id="best">0</b></span>
+</div>
+
+<canvas id="canvas" width="480" height="400"></canvas>
+
+<div>
+  <button id="start">START GAME</button>
+  <button id="pause">PAUSE</button>
+  <button id="restart">RESTART</button>
+  <button id="sound">🔊 SOUND ON</button>
+</div>
+
+<p>
+MOVE: ← → or A / D<br>
+Collect yellow coins. Avoid red blocks!<br>
+Collect 10 coins to reach the next level.<br>
+SPACE to start or pause.
+</p>
+
+</div>
+
+<script>
+
+// GAME SETUP
+
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+
+const scoreEl = document.getElementById("score");
+const livesEl = document.getElementById("lives");
+const bestEl = document.getElementById("best");
+const levelEl = document.getElementById("level");
+
+let player, objects;
+let score = 0;
+let lives = 3;
+let level = 1;
+let coinsCollected = 0;
+let levelMessageTimer = 0;
+
+let running = false;
+let gameOver = false;
+let animation;
+let frame = 0;
+
+let best = 0;
+let soundOn = true;
+let audio;
+
+try {
+  best = Number(localStorage.getItem("pixelBest")) || 0;
+} catch(e) {}
+
+bestEl.textContent = best;
+
+
+// RETRO SOUND ENGINE
+
+function initAudio() {
+  if (!audio) {
+    const AudioContext =
+      window.AudioContext || window.webkitAudioContext;
+
+    if (AudioContext) audio = new AudioContext();
+  }
+
+  if (audio && audio.state === "suspended") {
+    audio.resume();
+  }
+}
+
+function tone(freq, duration, type = "square",
+              volume = 0.08, endFreq = null) {
+
+  if (!soundOn || !audio) return;
+
+  const osc = audio.createOscillator();
+  const gain = audio.createGain();
+
+  osc.type = type;
+
+  osc.frequency.setValueAtTime(freq, audio.currentTime);
+
+  if (endFreq) {
+    osc.frequency.exponentialRampToValueAtTime(
+      endFreq,
+      audio.currentTime + duration
+    );
+  }
+
+  gain.gain.setValueAtTime(volume, audio.currentTime);
+
+  gain.gain.exponentialRampToValueAtTime(
+    0.001,
+    audio.currentTime + duration
+  );
+
+  osc.connect(gain);
+  gain.connect(audio.destination);
+
+  osc.start();
+  osc.stop(audio.currentTime + duration);
+}
+
+function playStart() {
+  tone(440, .12);
+  setTimeout(() => tone(660, .12), 120);
+  setTimeout(() => tone(880, .2), 240);
+}
+
+function playCoin() {
+  tone(880, .08);
+  setTimeout(() => tone(1320, .16), 80);
+}
+
+function playHit() {
+  tone(180, .25, "sawtooth", .12, 65);
+}
+
+function playPause() {
+  tone(400, .12);
+}
+
+function playGameOver() {
+  [440, 370, 310, 220].forEach((f, i) => {
+    setTimeout(() => tone(f, .25), i * 220);
+  });
+}
+
+function playLevelUp() {
+  [523, 659, 784, 1047].forEach((f, i) => {
+    setTimeout(() => tone(f, .18, "square", .09), i * 120);
+  });
+}
+
+
+// RESET GAME
+
+function reset() {
+
+  player = {
+    x: 220,
+    y: 340,
+    size: 24,
+    speed: 6
+  };
+
+  objects = [];
+
+  score = 0;
+  lives = 3;
+  level = 1;
+  coinsCollected = 0;
+  frame = 0;
+  levelMessageTimer = 0;
+
+  gameOver = false;
+
+  scoreEl.textContent = score;
+  livesEl.textContent = lives;
+  levelEl.textContent = level;
+
+  draw();
+}
+
+
+// KEYBOARD CONTROLS
+
+const keys = {};
+
+document.addEventListener("keydown", e => {
+
+  if (["ArrowLeft", "ArrowRight", " "].includes(e.key)) {
+    e.preventDefault();
+  }
+
+  keys[e.key.toLowerCase()] = true;
+
+  if (e.key === " " && !e.repeat) {
+
+    initAudio();
+
+    if (gameOver) {
+      startGame();
+    } else if (running) {
+      pauseGame();
+    } else {
+      startGame();
+    }
+  }
+});
+
+document.addEventListener("keyup", e => {
+  keys[e.key.toLowerCase()] = false;
+});
+
+
+// SPAWN OBJECTS
+
+function spawn() {
+
+  const coin = Math.random() < 0.35;
+
+  objects.push({
+
+    x: Math.random() * 440 + 10,
+    y: -25,
+
+    size: coin ? 15 : 25,
+
+    speed: (2 + Math.random() * 2) +
+           (level - 1) * 0.8,
+
+    type: coin ? "coin" : "enemy"
+
+  });
+}
+
+
+// DRAW PLAYER
+
+function drawPlayer() {
+
+  ctx.fillStyle = "#4df5d0";
+
+  ctx.fillRect(
+    player.x,
+    player.y,
+    24,
+    24
+  );
+
+  ctx.fillStyle = "#191638";
+
+  ctx.fillRect(player.x + 5, player.y + 6, 4, 4);
+  ctx.fillRect(player.x + 15, player.y + 6, 4, 4);
+  ctx.fillRect(player.x + 8, player.y + 16, 9, 3);
+}
+
+
+// DRAW GAME
+
+function draw() {
+
+  ctx.fillStyle = "#191638";
+  ctx.fillRect(0, 0, 480, 400);
+
+  // STARFIELD
+
+  ctx.fillStyle = "#68608c";
+
+  for (let i = 0; i < 35; i++) {
+
+    ctx.fillRect(
+      (i * 97) % 480,
+      (i * 53 + frame * 0.5) % 400,
+      2, 2
+    );
+
+  }
+
+  // GROUND
+
+  ctx.fillStyle = "#8d5cff";
+  ctx.fillRect(0, 375, 480, 3);
+
+  // PLAYER
+
+  drawPlayer();
+
+  // OBJECTS
+
+  objects.forEach(o => {
+
+    ctx.fillStyle =
+      o.type === "coin" ? "#ffdf45" : "#ff5470";
+
+    ctx.fillRect(o.x, o.y, o.size, o.size);
+
+    ctx.fillStyle =
+      o.type === "coin" ? "#fff4a0" : "#ff9aa9";
+
+    ctx.fillRect(o.x + 5, o.y + 5, 6, 6);
+
+  });
+
+  // LEVEL UP MESSAGE
+
+  if (levelMessageTimer > 0) {
+
+    ctx.fillStyle = "#ffdf45";
+    ctx.textAlign = "center";
+    ctx.font = "bold 34px monospace";
+
+    ctx.shadowColor = "#ff8ac7";
+    ctx.shadowBlur = 20;
+
+    ctx.fillText("LEVEL UP!", 240, 185);
+
+    ctx.shadowBlur = 0;
+
+    ctx.font = "16px monospace";
+    ctx.fillStyle = "#4df5d0";
+
+    ctx.fillText(
+      "LEVEL " + level + " UNLOCKED!",
+      240, 215
+    );
+  }
+
+  // START / GAME OVER SCREEN
+
+  if (!running) {
+
+    ctx.fillStyle = "rgba(10,8,30,.78)";
+    ctx.fillRect(45, 145, 390, 90);
+
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ffdf45";
+    ctx.font = "bold 25px monospace";
+
+    ctx.fillText(
+      gameOver ? "GAME OVER!" : "PIXEL DASH",
+      240, 182
+    );
+
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "14px monospace";
+
+    ctx.fillText(
+      gameOver ? "TRY AGAIN!" : "PRESS START TO PLAY",
+      240, 210
+    );
+  }
+}
+
+
+// LEVEL PROGRESSION
+
+function collectCoin() {
+
+  score += 10;
+  coinsCollected++;
+
+  playCoin();
+
+  // LEVEL UP AFTER EVERY 10 COINS
+
+  if (coinsCollected % 10 === 0) {
+
+    level++;
+
+    levelEl.textContent = level;
+
+    levelMessageTimer = 100;
+
+    playLevelUp();
+  }
+
+  scoreEl.textContent = score;
+}
+
+
+// MAIN GAME LOOP
+
+function update() {
+
+  if (!running) return;
+
+  frame++;
+
+  // PLAYER MOVEMENT
+
+  if (keys["arrowleft"] || keys["a"]) {
+    player.x -= player.speed;
+  }
+
+  if (keys["arrowright"] || keys["d"]) {
+    player.x += player.speed;
+  }
+
+  player.x = Math.max(
+    0,
+    Math.min(456, player.x)
+  );
+
+  // SPAWN RATE INCREASES WITH LEVEL
+
+  if (frame % Math.max(15, 65 - (level - 1) * 4) === 0) {
+    spawn();
+  }
+
+  // MOVE OBJECTS
+
+  objects.forEach(o => {
+    o.y += o.speed;
+  });
+
+  // COLLISION DETECTION
+
+  objects = objects.filter(o => {
+
+    if (
+      o.x < player.x + 24 &&
+      o.x + o.size > player.x &&
+      o.y < player.y + 24 &&
+      o.y + o.size > player.y
+    ) {
+
+      if (o.type === "coin") {
+
+        collectCoin();
+
+      } else {
+
+        lives--;
+
+        livesEl.textContent = lives;
+
+        playHit();
+
+        if (lives <= 0) {
+          endGame();
+        }
+      }
+
+      return false;
+    }
+
+    return o.y < 410;
+  });
+
+  // BEST SCORE
+
+  if (score > best) {
+
+    best = score;
+
+    bestEl.textContent = best;
+
+    try {
+      localStorage.setItem("pixelBest", best);
+    } catch(e) {}
+
+  }
+
+  // LEVEL UP MESSAGE TIMER
+
+  if (levelMessageTimer > 0) {
+    levelMessageTimer--;
+  }
+
+  // DRAW AND CONTINUE
+
+  draw();
+
+  if (running) {
+    animation = requestAnimationFrame(update);
+  }
+}
+
+
+// START GAME
+
+function startGame() {
+
+  initAudio();
+
+  if (running) return;
+
+  if (gameOver) {
+    reset();
+  }
+
+  running = true;
+
+  playStart();
+
+  cancelAnimationFrame(animation);
+
+  update();
+}
+
+
+// PAUSE GAME
+
+function pauseGame() {
+
+  if (!running) return;
+
+  running = false;
+
+  cancelAnimationFrame(animation);
+
+  playPause();
+
+  draw();
+}
+
+
+// GAME OVER
+
+function endGame() {
+
+  running = false;
+  gameOver = true;
+
+  cancelAnimationFrame(animation);
+
+  draw();
+
+  playGameOver();
+}
+
+
+// BUTTONS
+
+document.getElementById("start").onclick = startGame;
+
+document.getElementById("pause").onclick = pauseGame;
+
+document.getElementById("restart").onclick = () => {
+
+  initAudio();
+
+  running = false;
+
+  cancelAnimationFrame(animation);
+
+  reset();
+
+  startGame();
+};
+
+
+// SOUND ON / OFF
+
+document.getElementById("sound").onclick = () => {
+
+  soundOn = !soundOn;
+
+  document.getElementById("sound").textContent =
+    soundOn ? "🔊 SOUND ON" : "🔇 SOUND OFF";
+
+  if (soundOn) {
+    initAudio();
+    tone(660, .12);
+  }
+};
+
+
+// INITIALISE
+
+reset();
+
+</script>
+
+</body>
+</html>
